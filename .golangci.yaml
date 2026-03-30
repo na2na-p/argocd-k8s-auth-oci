@@ -11,13 +11,6 @@ linters:
     - gocritic
     - misspell
     - revive
-
-formatters:
-  enable:
-    - gofmt
-    - goimports
-
-issues:
   exclusions:
     generated: strict
     rules:
@@ -26,6 +19,11 @@ issues:
           - errcheck
           - gocritic
           - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 run:
   timeout: 5m
