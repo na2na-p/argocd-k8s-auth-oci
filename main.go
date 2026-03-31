@@ -8,14 +8,13 @@ import (
 )
 
 // version and commit are set via ldflags at build time.
-//
-//nolint:unused // These variables are populated via -ldflags at build time and will be used once the version command is implemented.
 var (
 	version = "dev"
 	commit  = "unknown"
 )
 
 func main() {
+	cmd.SetVersionInfo(version, commit)
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
