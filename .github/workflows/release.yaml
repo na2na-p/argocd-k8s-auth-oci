@@ -2,20 +2,56 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
   release:
-    name: Build and Push
+    name: Tag, Release, Build and Push
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate CalVer tag
+        id: calver
+        run: |
+          DATE=$(date -u +%Y.%m.%d)
+          BASE_TAG="v${DATE}"
+          # Check if base tag exists
+          if git tag -l "${BASE_TAG}" | grep -q .; then
+            # Find the highest suffix for today
+            LATEST=$(git tag -l "${BASE_TAG}.*" | sort -t. -k4 -n | tail -1)
+            if [ -z "$LATEST" ]; then
+              TAG="${BASE_TAG}.2"
+            else
+              NUM=$(echo "$LATEST" | awk -F. '{print $NF}')
+              TAG="${BASE_TAG}.$((NUM + 1))"
+            fi
+          else
+            TAG="${BASE_TAG}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          git tag "${{ steps.calver.outputs.tag }}"
+          git push origin "${{ steps.calver.outputs.tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.calver.outputs.tag }}" \
+            --title "${{ steps.calver.outputs.tag }}" \
+            --generate-notes
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -33,10 +69,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -44,10 +76,10 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/na2na-p/argocd-k8s-auth-oci:${{ steps.version.outputs.version }}
+            ghcr.io/na2na-p/argocd-k8s-auth-oci:${{ steps.calver.outputs.version }}
             ghcr.io/na2na-p/argocd-k8s-auth-oci:latest
           build-args: |
-            VERSION=${{ steps.version.outputs.version }}
+            VERSION=${{ steps.calver.outputs.version }}
             COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
