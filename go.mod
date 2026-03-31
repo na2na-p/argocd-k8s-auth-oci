@@ -3,6 +3,7 @@ module github.com/na2na-p/argocd-k8s-auth-oci
 go 1.26.1
 
 require (
+	github.com/google/go-cmp v0.7.0
 	github.com/oracle/oci-go-sdk/v65 v65.109.3
 	github.com/spf13/cobra v1.10.2
 	k8s.io/client-go v0.34.6
