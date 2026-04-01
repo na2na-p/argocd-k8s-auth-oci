@@ -86,7 +86,7 @@ func (g *ociTokenGenerator) Generate(_ context.Context, upstToken string, privat
 	q.Set("date", req.Header.Get("Date"))
 	req.URL.RawQuery = q.Encode()
 
-	token := base64.URLEncoding.EncodeToString([]byte(req.URL.String()))
+	token := base64.StdEncoding.EncodeToString([]byte(req.URL.String()))
 	expiry := time.Now().UTC().Add(g.tokenLifetime)
 
 	return token, expiry, nil
