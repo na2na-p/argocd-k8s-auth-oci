@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -80,13 +81,15 @@ func (g *ociTokenGenerator) Generate(_ context.Context, upstToken string, privat
 		return "", time.Time{}, fmt.Errorf("failed to sign request: %w", err)
 	}
 
-	// Add Authorization and Date as query parameters to the URL.
-	q := req.URL.Query()
-	q.Set("authorization", req.Header.Get("Authorization"))
-	q.Set("date", req.Header.Get("Date"))
-	req.URL.RawQuery = q.Encode()
+	// Build the signed URL string following the OKE token format:
+	// {endpoint}?{date=...&authorization=...}
+	// Using url.Values for proper encoding, with date before authorization
+	// to match the established OKE CLI convention.
+	params := url.Values{}
+	params.Add("date", req.Header.Get("Date"))
+	params.Add("authorization", req.Header.Get("Authorization"))
 
-	token := base64.StdEncoding.EncodeToString([]byte(req.URL.String()))
+	token := base64.StdEncoding.EncodeToString([]byte(endpoint + "?" + params.Encode()))
 	expiry := time.Now().UTC().Add(g.tokenLifetime)
 
 	return token, expiry, nil
