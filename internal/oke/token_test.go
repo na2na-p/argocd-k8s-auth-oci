@@ -41,13 +41,13 @@ func TestOKETokenGenerator_Generate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify the token is valid URL-safe base64.
+	// Verify the token is valid standard base64 (OKE expects StdEncoding).
 	if token == "" {
 		t.Fatal("token is empty")
 	}
-	decoded, err := base64.URLEncoding.DecodeString(token)
+	decoded, err := base64.StdEncoding.DecodeString(token)
 	if err != nil {
-		t.Fatalf("token is not valid URL-safe base64: %v", err)
+		t.Fatalf("token is not valid standard base64: %v", err)
 	}
 	if len(decoded) == 0 {
 		t.Fatal("decoded token is empty")
