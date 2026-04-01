@@ -33,6 +33,7 @@ func SetVersionInfo(version, commit string) {
 type rootOptions struct {
 	identityDomainURL string
 	clientID          string
+	clientSecret      string
 	clusterID         string
 	region            string
 	tokenPath         string
@@ -59,6 +60,7 @@ func newRootCmd(envLookup func(string) (string, bool)) (*cobra.Command, *rootOpt
 	flags := cmd.Flags()
 	flags.StringVar(&opts.identityDomainURL, "identity-domain-url", "", "OCI Identity Domain URL (env: OCI_IDENTITY_DOMAIN_URL)")
 	flags.StringVar(&opts.clientID, "client-id", "", "OCI client ID (env: OCI_CLIENT_ID)")
+	flags.StringVar(&opts.clientSecret, "client-secret", "", "OCI client secret (env: OCI_CLIENT_SECRET)")
 	flags.StringVar(&opts.clusterID, "cluster-id", "", "OKE cluster ID (env: OCI_CLUSTER_ID)")
 	flags.StringVar(&opts.region, "region", "", "OCI region (env: OCI_REGION)")
 	flags.StringVar(&opts.tokenPath, "token-path", "/var/run/secrets/oci-wif/token", "path to SA token file, use - for stdin (env: OCI_TOKEN_PATH)")
@@ -80,6 +82,7 @@ func bindEnvDefaults(cmd *cobra.Command, lookup func(string) (string, bool)) {
 	}{
 		{"OCI_IDENTITY_DOMAIN_URL", "identity-domain-url"},
 		{"OCI_CLIENT_ID", "client-id"},
+		{"OCI_CLIENT_SECRET", "client-secret"},
 		{"OCI_CLUSTER_ID", "cluster-id"},
 		{"OCI_REGION", "region"},
 		{"OCI_TOKEN_PATH", "token-path"},
@@ -155,7 +158,7 @@ func runRoot(cmd *cobra.Command, opts *rootOptions) error {
 	// Step 3: Create token exchanger with timeout-configured HTTP client.
 	logDebug("Creating token exchanger for %s", opts.identityDomainURL)
 	httpClient := &http.Client{Timeout: opts.timeout}
-	exchanger := auth.NewTokenExchanger(opts.identityDomainURL, opts.clientID, keyGen, httpClient)
+	exchanger := auth.NewTokenExchanger(opts.identityDomainURL, opts.clientID, opts.clientSecret, keyGen, httpClient)
 
 	// Step 4: Exchange SA token for UPST.
 	ctx := cmd.Context()

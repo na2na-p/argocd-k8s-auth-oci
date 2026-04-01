@@ -32,16 +32,19 @@ type tokenExchangeResponse struct {
 type ociTokenExchanger struct {
 	identityDomainURL string
 	clientID          string
+	clientSecret      string
 	keyGenerator      KeyGenerator
 	httpClient        *http.Client
 }
 
 // NewTokenExchanger creates a new TokenExchanger.
+// The clientSecret parameter is optional; when empty, Basic auth uses client_id with an empty password.
 // The httpClient parameter allows injection of a custom HTTP client for testing.
 // If httpClient is nil, http.DefaultClient is used.
 func NewTokenExchanger(
 	identityDomainURL string,
 	clientID string,
+	clientSecret string,
 	keyGenerator KeyGenerator,
 	httpClient *http.Client,
 ) TokenExchanger {
@@ -51,6 +54,7 @@ func NewTokenExchanger(
 	return &ociTokenExchanger{
 		identityDomainURL: identityDomainURL,
 		clientID:          clientID,
+		clientSecret:      clientSecret,
 		keyGenerator:      keyGenerator,
 		httpClient:        httpClient,
 	}
@@ -105,8 +109,9 @@ func (e *ociTokenExchanger) doExchange(
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	// Basic auth with client_id as username and empty password per OCI UPST spec.
-	basicAuth := base64.StdEncoding.EncodeToString([]byte(e.clientID + ":"))
+	// Basic auth with client_id as username and client_secret as password.
+	// When client_secret is empty, this is equivalent to "client_id:" (backward compatible).
+	basicAuth := base64.StdEncoding.EncodeToString([]byte(e.clientID + ":" + e.clientSecret))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 
 	resp, err := e.httpClient.Do(req)

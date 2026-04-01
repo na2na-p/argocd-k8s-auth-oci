@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -198,6 +199,7 @@ func TestTokenExchanger_Exchange(t *testing.T) {
 			exchanger := auth.NewTokenExchanger(
 				srv.URL,
 				"test-client-id",
+				"",
 				tt.keyGenerator,
 				srv.Client(),
 			)
@@ -260,6 +262,7 @@ func TestTokenExchanger_Exchange_PrivateKeyReturned(t *testing.T) {
 		exchanger := auth.NewTokenExchanger(
 			srv.URL,
 			"test-client-id",
+			"",
 			&fakeKeyGenerator{keyPair: realKP},
 			srv.Client(),
 		)
@@ -277,6 +280,71 @@ func TestTokenExchanger_Exchange_PrivateKeyReturned(t *testing.T) {
 			t.Errorf("PrivateKey is not *rsa.PrivateKey, got %T", result.PrivateKey)
 		}
 	})
+}
+
+func TestTokenExchanger_Exchange_BasicAuthWithClientSecret(t *testing.T) {
+	t.Parallel()
+
+	realGen := auth.NewKeyGenerator(nil)
+	realKP, err := realGen.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair for test setup: %v", err)
+	}
+
+	tests := []struct {
+		name             string
+		clientID         string
+		clientSecret     string
+		wantBasicAuthRaw string
+	}{
+		{
+			name:             "正常系: clientSecret が空の場合は client_id: の形式で Basic 認証ヘッダーが送信される",
+			clientID:         "my-client-id",
+			clientSecret:     "",
+			wantBasicAuthRaw: "my-client-id:",
+		},
+		{
+			name:             "正常系: clientSecret が指定された場合は client_id:client_secret の形式で Basic 認証ヘッダーが送信される",
+			clientID:         "my-client-id",
+			clientSecret:     "my-secret-value",
+			wantBasicAuthRaw: "my-client-id:my-secret-value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var capturedAuthHeader string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedAuthHeader = r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				resp := map[string]string{"token": "upst-token"}
+				if err := json.NewEncoder(w).Encode(resp); err != nil {
+					t.Errorf("failed to encode response: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			exchanger := auth.NewTokenExchanger(
+				srv.URL,
+				tt.clientID,
+				tt.clientSecret,
+				&fakeKeyGenerator{keyPair: realKP},
+				srv.Client(),
+			)
+
+			_, err := exchanger.Exchange(context.Background(), "sa-token")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			wantHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(tt.wantBasicAuthRaw))
+			if diff := cmp.Diff(wantHeader, capturedAuthHeader); diff != "" {
+				t.Errorf("Authorization header mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 // containsSubstring reports whether s contains substr.
