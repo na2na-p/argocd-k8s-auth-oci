@@ -2,10 +2,11 @@ package cmd_test
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 	"github.com/na2na-p/argocd-k8s-auth-oci/cmd"
 )
 
-// execCredentialJSON is a minimal representation used to verify JSON output.
+// execCredentialJSON は ExecCredential 出力検証用の最小構造体。
 type execCredentialJSON struct {
 	APIVersion string                    `json:"apiVersion"`
 	Kind       string                    `json:"kind"`
@@ -27,8 +28,50 @@ type execCredentialStatusJSON struct {
 	Token               string `json:"token,omitempty"`
 }
 
-// newTestRootCmd creates a root command for testing via cmd.NewRootCmdForTest.
-// It captures stdout into the returned buffer.
+// writeTestKeyPEM はテスト用 RSA 鍵を PKCS#1 PEM 形式で TempDir に書き出し、
+// そのファイルパスを返す。auth.Config.Provider() が PEM 読み取り → SDK 構築まで
+// 通すことを検証するために利用する。
+func writeTestKeyPEM(t *testing.T) string {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	})
+	path := filepath.Join(t.TempDir(), "oci_api_key.pem")
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+	return path
+}
+
+// fullAuthEnv は OCI API キー認証で必須の環境変数すべてを map で返す。
+// 各テストはこの戻り値を起点に欠落 / 上書きを表現する。
+func fullAuthEnv(keyFile string) map[string]string {
+	return map[string]string{
+		"OCI_TENANCY":     "ocid1.tenancy.oc1..t",
+		"OCI_USER":        "ocid1.user.oc1..u",
+		"OCI_FINGERPRINT": "aa:bb:cc:dd:ee",
+		"OCI_KEY_FILE":    keyFile,
+		"OCI_REGION":      "us-ashburn-1",
+		"OCI_CLUSTER_ID":  "ocid1.cluster.oc1.iad.test",
+	}
+}
+
+// newLookup は map ベースの環境変数 lookup を生成する。
+func newLookup(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		v, ok := env[key]
+		return v, ok
+	}
+}
+
+// newTestRootCmd は cmd.NewRootCmdForTest 経由で root コマンドを生成し、
+// stdout を bytes.Buffer に取り込んで返す。
 func newTestRootCmd(envLookup func(string) (string, bool), args []string) (*bytes.Buffer, error) {
 	rootCmd := cmd.NewRootCmdForTest(envLookup)
 	buf := new(bytes.Buffer)
@@ -40,7 +83,7 @@ func newTestRootCmd(envLookup func(string) (string, bool), args []string) (*byte
 }
 
 func TestRootCommand_VersionFlag(t *testing.T) {
-	// Do not use t.Parallel() because SetVersionInfo modifies package-level state.
+	// SetVersionInfo が package-level state を変更するため t.Parallel() は使わない。
 
 	tests := []struct {
 		name       string
@@ -67,7 +110,7 @@ func TestRootCommand_VersionFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sequential execution required: SetVersionInfo mutates shared package state.
+			// SetVersionInfo の競合を避けるため逐次実行。
 			cmd.SetVersionInfo(tt.version, tt.commit)
 
 			noEnv := func(string) (string, bool) { return "", false }
@@ -88,48 +131,25 @@ func TestRootCommand_VersionFlag(t *testing.T) {
 func TestRootCommand_RequiredFlagValidation(t *testing.T) {
 	t.Parallel()
 
-	// Create a temporary token file.
-	tmpDir := t.TempDir()
-	tokenFile := filepath.Join(tmpDir, "token")
-	if err := os.WriteFile(tokenFile, []byte("test-sa-token"), 0o600); err != nil {
-		t.Fatalf("failed to write token file: %v", err)
-	}
-
 	tests := []struct {
 		name          string
 		args          []string
-		wantErr       bool
 		wantErrSubstr string
 	}{
 		{
-			name:          "異常系: --identity-domain-url 未指定でエラー",
-			args:          []string{"--client-id=cid", "--cluster-id=clid", "--region=us-ashburn-1", "--token-path=" + tokenFile},
-			wantErr:       true,
-			wantErrSubstr: "--identity-domain-url is required",
-		},
-		{
-			name:          "異常系: --client-id 未指定でエラー",
-			args:          []string{"--identity-domain-url=https://example.com", "--cluster-id=clid", "--region=us-ashburn-1", "--token-path=" + tokenFile},
-			wantErr:       true,
-			wantErrSubstr: "--client-id is required",
-		},
-		{
 			name:          "異常系: --cluster-id 未指定でエラー",
-			args:          []string{"--identity-domain-url=https://example.com", "--client-id=cid", "--region=us-ashburn-1", "--token-path=" + tokenFile},
-			wantErr:       true,
+			args:          []string{"--region=us-ashburn-1"},
 			wantErrSubstr: "--cluster-id is required",
 		},
 		{
 			name:          "異常系: --region 未指定でエラー",
-			args:          []string{"--identity-domain-url=https://example.com", "--client-id=cid", "--cluster-id=clid", "--token-path=" + tokenFile},
-			wantErr:       true,
+			args:          []string{"--cluster-id=ocid1.cluster.oc1.iad.test"},
 			wantErrSubstr: "--region is required",
 		},
 		{
-			name:          "異常系: 全必須フラグ未指定でエラー",
-			args:          []string{"--token-path=" + tokenFile},
-			wantErr:       true,
-			wantErrSubstr: "--identity-domain-url is required",
+			name:          "異常系: 必須フラグ全未指定でエラー",
+			args:          []string{},
+			wantErrSubstr: "--cluster-id is required",
 		},
 	}
 
@@ -140,17 +160,11 @@ func TestRootCommand_RequiredFlagValidation(t *testing.T) {
 			noEnv := func(string) (string, bool) { return "", false }
 			_, err := newTestRootCmd(noEnv, tt.args)
 
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error but got nil")
-				}
-				if !strings.Contains(err.Error(), tt.wantErrSubstr) {
-					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErrSubstr)
-				}
-				return
+			if err == nil {
+				t.Fatal("expected error but got nil")
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tt.wantErrSubstr)
 			}
 		})
 	}
@@ -160,49 +174,42 @@ func TestRootCommand_EnvVariableBinding(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		envVars       map[string]string
-		args          []string
-		wantErr       bool
-		wantErrSubstr string
+		name              string
+		envOverride       map[string]string
+		envDelete         []string
+		args              []string
+		wantErrSubstr     string
+		wantClusterRegion bool // cluster-id と region がフラグ経由で設定されることを期待
 	}{
 		{
-			name: "正常系: 環境変数から全必須フラグが読み取られる（トークン読み取りでエラーになるが環境変数バインドは成功）",
-			envVars: map[string]string{
-				"OCI_IDENTITY_DOMAIN_URL": "https://identity.example.com",
-				"OCI_CLIENT_ID":           "test-client-id",
-				"OCI_CLUSTER_ID":          "ocid1.cluster.oc1.iad.test",
-				"OCI_REGION":              "us-ashburn-1",
-				"OCI_TOKEN_PATH":          "/nonexistent/path",
-			},
-			args:          []string{},
-			wantErr:       true,
-			wantErrSubstr: "failed to read SA token", // All required flags set, but token file missing
-		},
-		{
-			name: "正常系: OCI_TOKEN_PATH 環境変数でトークンパスが設定される",
-			envVars: map[string]string{
-				"OCI_IDENTITY_DOMAIN_URL": "https://identity.example.com",
-				"OCI_CLIENT_ID":           "test-client-id",
-				"OCI_CLUSTER_ID":          "ocid1.cluster.oc1.iad.test",
-				"OCI_REGION":              "us-ashburn-1",
-				"OCI_TOKEN_PATH":          "/custom/token/path",
-			},
-			args:          []string{},
-			wantErr:       true,
-			wantErrSubstr: "/custom/token/path", // Error should reference the custom path
+			name:              "正常系: OCI_CLUSTER_ID / OCI_REGION 環境変数からフラグが設定される",
+			args:              []string{},
+			wantClusterRegion: true,
 		},
 		{
 			name: "正常系: フラグが環境変数より優先される",
-			envVars: map[string]string{
-				"OCI_IDENTITY_DOMAIN_URL": "https://env-identity.example.com",
-				"OCI_CLIENT_ID":           "env-client-id",
-				"OCI_CLUSTER_ID":          "env-cluster-id",
-				"OCI_REGION":              "env-region",
+			envOverride: map[string]string{
+				"OCI_CLUSTER_ID": "env-cluster-id",
+				"OCI_REGION":     "env-region",
 			},
-			args:          []string{"--identity-domain-url=https://flag-identity.example.com", "--client-id=flag-client-id", "--cluster-id=flag-cluster-id", "--region=flag-region", "--token-path=/nonexistent"},
-			wantErr:       true,
-			wantErrSubstr: "failed to read SA token",
+			args:              []string{"--cluster-id=flag-cluster-id", "--region=flag-region"},
+			wantClusterRegion: true,
+		},
+		{
+			name: "異常系: OCI_TENANCY 未設定で configuration error",
+			envDelete: []string{
+				"OCI_TENANCY",
+			},
+			args:          []string{},
+			wantErrSubstr: "OCI authentication configuration error",
+		},
+		{
+			name: "異常系: OCI_KEY_FILE が存在しないパスを指すと key file error",
+			envOverride: map[string]string{
+				"OCI_KEY_FILE": "/nonexistent/path/to/key.pem",
+			},
+			args:          []string{},
+			wantErrSubstr: "OCI key file error",
 		},
 	}
 
@@ -210,86 +217,29 @@ func TestRootCommand_EnvVariableBinding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			envLookup := func(key string) (string, bool) {
-				v, ok := tt.envVars[key]
-				return v, ok
+			keyFile := writeTestKeyPEM(t)
+			env := fullAuthEnv(keyFile)
+			for k, v := range tt.envOverride {
+				env[k] = v
+			}
+			for _, k := range tt.envDelete {
+				delete(env, k)
 			}
 
-			_, err := newTestRootCmd(envLookup, tt.args)
+			_, err := newTestRootCmd(newLookup(env), tt.args)
 
-			if tt.wantErr {
+			if tt.wantErrSubstr != "" {
 				if err == nil {
-					t.Fatal("expected error but got nil")
-				}
-				if tt.wantErrSubstr != "" && !strings.Contains(err.Error(), tt.wantErrSubstr) {
-					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErrSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestRootCommand_TokenFileReading(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		tokenContent  string
-		wantErr       bool
-		wantErrSubstr string
-	}{
-		{
-			name:          "異常系: トークンファイルが空の場合にエラー",
-			tokenContent:  "",
-			wantErr:       true,
-			wantErrSubstr: "token file is empty",
-		},
-		{
-			name:          "異常系: 存在しないトークンファイルでエラー",
-			tokenContent:  "", // Will use a nonexistent path instead.
-			wantErr:       true,
-			wantErrSubstr: "failed to open token file",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			var tokenPath string
-			if tt.name == "異常系: 存在しないトークンファイルでエラー" {
-				tokenPath = "/nonexistent/token/file"
-			} else {
-				tmpDir := t.TempDir()
-				tokenPath = filepath.Join(tmpDir, "token")
-				if err := os.WriteFile(tokenPath, []byte(tt.tokenContent), 0o600); err != nil {
-					t.Fatalf("failed to write token file: %v", err)
-				}
-			}
-
-			noEnv := func(string) (string, bool) { return "", false }
-			args := []string{
-				"--identity-domain-url=https://example.com",
-				"--client-id=cid",
-				"--cluster-id=clid",
-				"--region=us-ashburn-1",
-				"--token-path=" + tokenPath,
-			}
-			_, err := newTestRootCmd(noEnv, args)
-
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error but got nil")
+					t.Fatalf("expected error containing %q but got nil", tt.wantErrSubstr)
 				}
 				if !strings.Contains(err.Error(), tt.wantErrSubstr) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErrSubstr)
 				}
 				return
 			}
+
+			// wantClusterRegion ケースでは provider 構築まで成功し OKE token 生成まで
+			// 到達するため、err は nil になる想定。
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -303,58 +253,27 @@ func TestRootCommand_IntegrationSuccess(t *testing.T) {
 	t.Run("正常系: 全モジュール統合でExecCredential JSONが出力される", func(t *testing.T) {
 		t.Parallel()
 
-		// Set up a mock token exchange server.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Verify the request is a POST to /oauth2/v1/token.
-			if r.Method != http.MethodPost {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			if !strings.HasSuffix(r.URL.Path, "/oauth2/v1/token") {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			resp := map[string]string{"token": "test-upst-token-from-mock-server"}
-			if err := json.NewEncoder(w).Encode(resp); err != nil {
-				http.Error(w, "failed to encode response", http.StatusInternalServerError)
-			}
-		}))
-		t.Cleanup(srv.Close)
-
-		// Create a temporary token file.
-		tmpDir := t.TempDir()
-		tokenFile := filepath.Join(tmpDir, "sa-token")
-		if err := os.WriteFile(tokenFile, []byte("mock-sa-token-value"), 0o600); err != nil {
-			t.Fatalf("failed to write token file: %v", err)
-		}
-
-		noEnv := func(string) (string, bool) { return "", false }
+		keyFile := writeTestKeyPEM(t)
+		env := fullAuthEnv(keyFile)
 		args := []string{
-			"--identity-domain-url=" + srv.URL,
-			"--client-id=test-client-id",
-			"--cluster-id=ocid1.cluster.oc1.iad.test",
-			"--region=us-ashburn-1",
-			"--token-path=" + tokenFile,
 			"--token-lifetime=4m",
 			"--timeout=10s",
 		}
 
-		buf, err := newTestRootCmd(noEnv, args)
+		buf, err := newTestRootCmd(newLookup(env), args)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// Verify the output is valid ExecCredential JSON.
-		output := strings.TrimSpace(buf.String())
-		if output == "" {
+		// 出力が valid な ExecCredential JSON であることを検証する。
+		out := strings.TrimSpace(buf.String())
+		if out == "" {
 			t.Fatal("output is empty")
 		}
 
 		var cred execCredentialJSON
-		if err := json.Unmarshal([]byte(output), &cred); err != nil {
-			t.Fatalf("failed to parse ExecCredential JSON: %v\nraw output: %s", err, output)
+		if err := json.Unmarshal([]byte(out), &cred); err != nil {
+			t.Fatalf("failed to parse ExecCredential JSON: %v\nraw output: %s", err, out)
 		}
 
 		wantAPIVersion := "client.authentication.k8s.io/v1beta1"
@@ -388,15 +307,6 @@ func TestRootCommand_DefaultFlagValues(t *testing.T) {
 		noEnv := func(string) (string, bool) { return "", false }
 		rootCmd := cmd.NewRootCmdForTest(noEnv)
 
-		// Verify default values for optional flags.
-		tokenPathFlag := rootCmd.Flags().Lookup("token-path")
-		if tokenPathFlag == nil {
-			t.Fatal("token-path flag not found")
-		}
-		if diff := cmp.Diff("/var/run/secrets/oci-wif/token", tokenPathFlag.DefValue); diff != "" {
-			t.Errorf("token-path default mismatch (-want +got):\n%s", diff)
-		}
-
 		tokenLifetimeFlag := rootCmd.Flags().Lookup("token-lifetime")
 		if tokenLifetimeFlag == nil {
 			t.Fatal("token-lifetime flag not found")
@@ -427,6 +337,30 @@ func TestRootCommand_DefaultFlagValues(t *testing.T) {
 		}
 		if diff := cmp.Diff("v", versionFlag.Shorthand); diff != "" {
 			t.Errorf("version shorthand mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestRootCommand_RemovedLegacyFlags(t *testing.T) {
+	t.Parallel()
+
+	// UPST 経路で利用していた旧フラグが新コマンドから完全に削除されていることを保証する。
+	t.Run("異常系: 旧UPSTフラグはすべて削除されている", func(t *testing.T) {
+		t.Parallel()
+
+		noEnv := func(string) (string, bool) { return "", false }
+		rootCmd := cmd.NewRootCmdForTest(noEnv)
+
+		legacyFlags := []string{
+			"identity-domain-url",
+			"client-id",
+			"client-secret",
+			"token-path",
+		}
+		for _, name := range legacyFlags {
+			if f := rootCmd.Flags().Lookup(name); f != nil {
+				t.Errorf("legacy flag --%s should be removed but still present", name)
+			}
 		}
 	})
 }
@@ -471,42 +405,4 @@ func TestRootCommand_MaskToken(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRootCommand_TokenExchangeError(t *testing.T) {
-	t.Parallel()
-
-	t.Run("異常系: トークン交換が失敗した場合にエラーが返される", func(t *testing.T) {
-		t.Parallel()
-
-		// Set up a mock server that always returns 401.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"error":"unauthorized"}`)
-		}))
-		t.Cleanup(srv.Close)
-
-		tmpDir := t.TempDir()
-		tokenFile := filepath.Join(tmpDir, "sa-token")
-		if err := os.WriteFile(tokenFile, []byte("mock-sa-token"), 0o600); err != nil {
-			t.Fatalf("failed to write token file: %v", err)
-		}
-
-		noEnv := func(string) (string, bool) { return "", false }
-		args := []string{
-			"--identity-domain-url=" + srv.URL,
-			"--client-id=test-client-id",
-			"--cluster-id=ocid1.cluster.oc1.iad.test",
-			"--region=us-ashburn-1",
-			"--token-path=" + tokenFile,
-		}
-		_, err := newTestRootCmd(noEnv, args)
-
-		if err == nil {
-			t.Fatal("expected error but got nil")
-		}
-		if !strings.Contains(err.Error(), "token exchange failed") {
-			t.Errorf("error %q does not contain %q", err.Error(), "token exchange failed")
-		}
-	})
 }
