@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
     -o /argocd-k8s-auth-oci .
 
-FROM busybox:1.37-uclibc AS busybox
+FROM busybox:1.38-uclibc AS busybox
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
