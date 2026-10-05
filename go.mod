@@ -6,8 +6,8 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/oracle/oci-go-sdk/v65 v65.109.3
 	github.com/spf13/cobra v1.10.2
-	k8s.io/apimachinery v0.35.4
-	k8s.io/client-go v0.35.4
+	k8s.io/apimachinery v0.37.1
+	k8s.io/client-go v0.37.1
 )
 
 require (
